@@ -8,4 +8,4 @@ __global__ void compute_image_histogram_naive(const float *img, const int img_si
 __global__ void compute_image_histogram_faster(const float *img, const int img_size, const int stride, float min_bin_val, float max_bin_val, int *d_bins, const int numBins);
 __global__ void compute_histogram_distribution(const int *dbins, int *cdf, int numBins);
 extern "C" float *convert_rgb_to_yuv(float *buf, int rows, int cols, int channels);
-extern "C" void *get_image_histogram(float *buf, int rows, int cols, int channels, int n_bins);
+extern "C" unsigned char *equalize_histogram(float *buf, int rows, int cols, int channels, int n_bins);

@@ -12,9 +12,20 @@ cv::Mat load_hd_image(const char *filename)
         std::cerr << "Couldn't open file" << filename << std::endl;
     }
 
-    if (img.type() != CV_32FC3)
+    if (img.depth() == CV_8U)
     {
-        img.convertTo(img, CV_32FC3);
+        img.convertTo(img, CV_32FC3, 1.0 / 255.0);
+    }
+    else if (img.depth() == CV_16U)
+    {
+        img.convertTo(img, CV_32FC3, 1.0 / 65535.0);
+    }
+    else if (img.depth() == CV_32F)
+    {
+        if (img.type() != CV_32FC3)
+        {
+            img.convertTo(img, CV_32FC3);
+        }
     }
     cv::cvtColor(img, img, cv::COLOR_BGR2RGB);
 
@@ -29,5 +40,19 @@ void save_yuv_as_jpg(const float *yuv_buf, int rows, int cols, const char *out_p
     if (!cv::imwrite(out_path, yuv_image))
     {
         std::cerr << "Failed to save image: " << out_path << std::endl;
+    }
+}
+
+void save_image(unsigned char *rgb_buf, int rows, int cols, const char *out_path)
+{
+    cv::Mat img(rows, cols, CV_8UC3, rgb_buf);
+    cv::cvtColor(img, img, cv::COLOR_BGR2RGB);
+    if (cv::imwrite(out_path, img))
+    {
+        std::cout << "Image saved as " << out_path << std::endl;
+    }
+    else
+    {
+        std::cerr << "Error saving image: " << out_path << std::endl;
     }
 }

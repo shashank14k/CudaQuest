@@ -11,7 +11,7 @@ int main(int argc, char *argv[])
     }
 
     cv::Mat image = load_hd_image(argv[1]);
-    float *yuv_buf = convert_rgb_to_yuv(image.ptr<float>(), image.rows, image.cols, 3);
-    save_yuv_as_jpg(yuv_buf, image.rows, image.cols, argv[2]);
-    get_image_histogram(image.ptr<float>(), image.rows, image.cols, 3, 255);
+    unsigned char *equalized_rgb_img = equalize_histogram(image.ptr<float>(), image.rows, image.cols, 3, 256);
+    save_image(equalized_rgb_img, image.rows, image.cols, argv[2]);
+    free(equalized_rgb_img);
 }

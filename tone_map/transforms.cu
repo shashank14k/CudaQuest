@@ -103,7 +103,8 @@ __global__ void compute_image_histogram_naive(const float *img, const int img_si
     int pix_idx = tid * stride;
     if (pix_idx < img_size)
     {
-        int bin = static_cast<int>(img[pix_idx] - min_bin_val) * numBins / (max_bin_val - min_bin_val);
+        float normalized_val = (img[pix_idx] - min_bin_val) / (max_bin_val - min_bin_val);
+        int bin = static_cast<int>(normalized_val * numBins);
         bin = max(0, min(bin, numBins - 1));
         atomicAdd(&(d_bins[bin]), 1); // Number of global atomic adds scale to size of img buffer
     }
@@ -122,21 +123,22 @@ __global__ void compute_image_histogram_faster(const float *img, const int img_s
     int pix_idx = tid * stride;
     if (pix_idx < img_size)
     {
-        int bin = static_cast<int>(img[pix_idx] - min_bin_val) * numBins / (max_bin_val - min_bin_val);
+        float normalized_val = (img[pix_idx] - min_bin_val) / (max_bin_val - min_bin_val);
+        int bin = static_cast<int>(normalized_val * numBins);
         bin = max(0, min(bin, numBins - 1));
         atomicAdd(&(s_res[bin]), 1);
     }
 
     __syncthreads();
 
-    // Number of global atomic adds equstd::cout << "Image Loaded " << std::endl;als number of bins times the number of threadblocks
+    // Number of global atomic adds equals number of bins times the number of threadblocks
     if (threadIdx.x < numBins)
     {
         atomicAdd(&d_bins[threadIdx.x], s_res[threadIdx.x]);
     }
 }
 
-__global__ void compute_histogram_distribution(const int *dbins, int *cdf, int numBins)
+__global__ void compute_histogram_distribution(const int *dbins, float *cdf, int numBins, int normalize_const)
 {
     /*
        A simple way would be for each thread to load data from global memory at each of the log(n) step,
@@ -170,7 +172,30 @@ __global__ void compute_histogram_distribution(const int *dbins, int *cdf, int n
     }
     if (tidx < numBins)
     {
-        cdf[tidx] = s_dbins[threadIdx.x];
+        cdf[tidx] = s_dbins[threadIdx.x] * (1.f / normalize_const);
+    }
+}
+
+__global__ void equalize_hist(unsigned char *out_buf, float *in_buf, float *cdf, float min_bin_val, float max_bin_val, const int numBins, int tot_pixels)
+{
+    int tid = blockDim.x * blockIdx.x + threadIdx.x;
+    int lum_idx = tid * 3;
+    if (lum_idx < tot_pixels)
+    {
+        float normalized_val = (in_buf[lum_idx] - min_bin_val) / (max_bin_val - min_bin_val);
+        int bin = static_cast<int>(normalized_val * numBins);
+        bin = max(0, min(bin, numBins - 1));
+        float lum_val = cdf[bin];
+        float scale_factor = lum_val / (in_buf[lum_idx] + 1e-6f);
+        float U = in_buf[lum_idx + 1] * scale_factor;
+        float V = in_buf[lum_idx + 2] * scale_factor;
+        float R = fmaxf(0, fminf(lum_val + 1.402f * V, 1));
+        float G = fmaxf(0, fminf(lum_val - 0.344136f * U - 0.714136f * V, 1));
+        float B = fmaxf(0, fminf(lum_val + 1.772f * U, 1));
+
+        out_buf[tid * 3] = static_cast<unsigned char>(R * 255);
+        out_buf[tid * 3 + 1] = static_cast<unsigned char>(G * 255);
+        out_buf[tid * 3 + 2] = static_cast<unsigned char>(B * 255);
     }
 }
 
@@ -192,10 +217,9 @@ extern "C" float *convert_rgb_to_yuv(float *buf, int rows, int cols, int channel
     return out_buf;
 }
 
-extern "C" void *get_image_histogram(float *buf, int rows, int cols, int channels, int n_bins)
+extern "C" unsigned char *equalize_histogram(float *buf, int rows, int cols, int channels, int n_bins)
 {
     size_t tot_pixels = rows * cols * channels;
-    float *out_buf = (float *)malloc(sizeof(float) * tot_pixels);
     float *cu_inbuf, *cu_outbuf;
     cudaMalloc(&cu_inbuf, tot_pixels * sizeof(float));
     cudaMalloc(&cu_outbuf, tot_pixels * sizeof(float));
@@ -216,13 +240,31 @@ extern "C" void *get_image_histogram(float *buf, int rows, int cols, int channel
     cudaMemcpy(&min_lum, min_cu_buf, sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(&max_lum, max_cu_buf, sizeof(float), cudaMemcpyDeviceToHost);
     // Histogram bin
-    int *dbins, *cdf, *cdf_cpu;
-    cdf_cpu = (int *)malloc(n_bins * sizeof(int));
+    int *dbins;
+    float *cdf;
+
     cudaMalloc(&dbins, n_bins * sizeof(int));
     cudaMemset(dbins, 0, n_bins * sizeof(int));
-    cudaMalloc(&cdf, n_bins * sizeof(int));
-    cudaMemset(cdf, 0, n_bins * sizeof(int));
+    cudaMalloc(&cdf, n_bins * sizeof(float));
+    cudaMemset(cdf, 0, n_bins * sizeof(float));
     compute_image_histogram_faster<<<num_blocks, MAX_THREADS_PER_BLOCK, n_bins>>>(cu_outbuf, tot_pixels, 3, min_lum, max_lum, dbins, n_bins);
-    compute_histogram_distribution<<<1, n_bins, n_bins>>>(dbins, cdf, n_bins);
-    cudaMemcpy(cdf_cpu, cdf, sizeof(int) * n_bins, cudaMemcpyDeviceToHost);
+    compute_histogram_distribution<<<1, n_bins, n_bins>>>(dbins, cdf, n_bins, tot_pixels / 3);
+
+    // Out RGB BUF
+    unsigned char *rgb_buf, *rgb_buf_cu;
+    rgb_buf = (unsigned char *)malloc(sizeof(unsigned char) * tot_pixels);
+    cudaMalloc(&rgb_buf_cu, sizeof(int) * tot_pixels);
+    equalize_hist<<<num_blocks, MAX_THREADS_PER_BLOCK>>>(rgb_buf_cu, cu_outbuf, cdf, min_lum, max_lum, n_bins, tot_pixels);
+    cudaMemcpy(rgb_buf, rgb_buf_cu, sizeof(unsigned char) * tot_pixels, cudaMemcpyDeviceToHost);
+
+    // Free CUDA bufs
+    cudaFree(cu_inbuf);
+    cudaFree(cu_outbuf);
+    cudaFree(dbins);
+    cudaFree(cdf);
+    cudaFree(max_cu_buf);
+    cudaFree(min_cu_buf);
+
+    // Free CPU bufs
+    return rgb_buf;
 }
